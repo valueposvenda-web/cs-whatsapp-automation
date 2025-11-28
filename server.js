@@ -13,7 +13,8 @@ const LINDY_WEBHOOK_URL = process.env.LINDY_WEBHOOK_URL;
 const WASENDER_BASE_URL = 'https://wasenderapi.com/api';
 
 // 🔒 MODO SEGURO - MUDE PARA FALSE QUANDO QUISER ATIVAR RESPOSTAS
-const DRY_RUN_MODE = true; // TRUE = não envia nada, FALSE = envia para valer
+const DRY_RUN_MODE = false; // FALSE = envia para valer
+
 
 const conversationContext = new Map();
 
