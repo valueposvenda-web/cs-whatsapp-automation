@@ -5,57 +5,70 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Configurações
 const WASENDER_API_KEY = process.env.WASENDER_API_KEY;
-const LINDY_WEBHOOK_URL = process.env.LINDY_WEBHOOK_URL || 'https://public.lindy.ai/api/v1/webhooks/lindy/df7f842f-93b6-467d-bc49-f9fbebcfe063';
+const LINDY_WEBHOOK_URL = process.env.LINDY_WEBHOOK_URL;
 const WASENDER_BASE_URL = 'https://wasenderapi.com/api';
 
-// Armazenar contexto de conversas
+// 🔒 MODO SEGURO - MUDE PARA FALSE QUANDO QUISER ATIVAR RESPOSTAS
+const DRY_RUN_MODE = true; // TRUE = não envia nada, FALSE = envia para valer
+
 const conversationContext = new Map();
+
+// ==================== VALIDAÇÃO ====================
+const isValidLindy = LINDY_WEBHOOK_URL && 
+                     LINDY_WEBHOOK_URL.startsWith('https://public.lindy.ai/') &&
+                     !LINDY_WEBHOOK_URL.includes('placeholder');
+
+console.log('🔒 ==================== INICIALIZAÇÃO ====================');
+console.log(`🔒 MODO SEGURO (DRY_RUN): ${DRY_RUN_MODE ? '✅ ATIVADO' : '❌ DESATIVADO'}`);
+console.log(`✅ WASENDER API KEY: ${WASENDER_API_KEY ? 'Configurado' : '❌ Falta'}`);
+console.log(`${isValidLindy ? '✅' : '❌'} LINDY URL: ${isValidLindy ? 'Válida' : 'Inválida'}`);
+console.log('🔒 =====================================================');
+
+if (DRY_RUN_MODE) {
+  console.log('🚨 AVISO: DRY_RUN_MODE ativado!');
+  console.log('🚨 Nenhuma mensagem será enviada para WhatsApp!');
+  console.log('🚨 Tudo funcionará COMO SE fosse enviar, mas não enviará.');
+}
 
 // ==================== ENDPOINTS ====================
 
-// Health Check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'OK',
+    dry_run_mode: DRY_RUN_MODE,
+    lindy_configured: isValidLindy,
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Main Webhook - Recebe mensagens do WASender
 app.post('/webhook', async (req, res) => {
   try {
     console.log('📨 Webhook recebido:', JSON.stringify(req.body, null, 2));
 
     if (!req.body || !req.body.data) {
-      console.log('⚠️ Body vazio ou sem data');
       return res.status(200).json({ received: true });
     }
 
-    // PARSER CORRIGIDO para WASender
     const event = req.body.event;
     const messageData = req.body.data.messages;
     
     if (!messageData) {
-      console.log('⚠️ Sem dados de mensagem');
       return res.status(200).json({ received: true });
     }
 
-    // Extrair telefone do remoteJid
     let phone = messageData.remoteJid;
     if (!phone) {
-      console.log('⚠️ Sem telefone');
       return res.status(200).json({ received: true });
     }
 
-    // Se for grupo, usar participant
     if (phone.includes('@g.us') && messageData.key?.participant) {
       phone = messageData.key.participant;
     }
 
-    // Extrair mensagem de texto
     let message = null;
     const msg = messageData.message;
     
@@ -73,7 +86,6 @@ app.post('/webhook', async (req, res) => {
       message = '[Mensagem sem texto]';
     }
 
-    // Se for mensagem de system (como senderKeyDistributionMessage), ignorar
     if (msg.senderKeyDistributionMessage || !message) {
       console.log('⏭️ Ignorando mensagem de sistema');
       return res.status(200).json({ received: true });
@@ -81,14 +93,15 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`✅ Extraído: phone=${phone}, message="${message}"`);
 
-    // Processar mensagem
     const resultado = await processarMensagem(phone, message);
 
     res.status(200).json({
       received: true,
       processed: true,
       response_sent: resultado.enviada,
-      customer_type: resultado.customer_type
+      customer_type: resultado.customer_type,
+      dry_run_mode: DRY_RUN_MODE,
+      message: DRY_RUN_MODE ? 'Simulado (não enviado)' : 'Enviado para valer'
     });
 
   } catch (error) {
@@ -97,13 +110,13 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ==================== FUNÇÕES PRINCIPAIS ====================
+// ==================== FUNÇÕES ====================
 
 async function processarMensagem(phone, mensagem) {
   try {
     console.log(`🔄 Processando: ${phone} - "${mensagem}"`);
+    console.log(`   Modo: ${DRY_RUN_MODE ? '🟢 DRY_RUN (não envia)' : '🔴 PRODUÇÃO (envia de verdade)'}`);
 
-    // Contexto
     let contexto = conversationContext.get(phone) || {
       phone,
       messages: [],
@@ -117,7 +130,31 @@ async function processarMensagem(phone, mensagem) {
       timestamp: new Date()
     });
 
-    // Enviar para Lindy
+    // Se estiver em DRY_RUN, não envia para Lindy
+    if (DRY_RUN_MODE) {
+      console.log('🟢 DRY_RUN: Simulando resposta (não enviando para Lindy)');
+      
+      const resposta = 'Olá! Obrigado pelo contato. [RESPOSTA SIMULADA]';
+      const customer_type = 'novo';
+      
+      contexto.messages.push({
+        role: 'assistant',
+        content: resposta,
+        timestamp: new Date()
+      });
+
+      conversationContext.set(phone, contexto);
+
+      console.log(`✅ Simulado: ${customer_type}`);
+      return { enviada: false, customer_type, requires_human: false };
+    }
+
+    // Se não tiver Lindy válida, não envia
+    if (!isValidLindy) {
+      console.log('❌ Lindy não configurado - não processando');
+      return { enviada: false, customer_type: contexto.customer_type };
+    }
+
     const lindyResponse = await enviarParaLindy(phone, mensagem, contexto);
 
     if (!lindyResponse) {
@@ -125,7 +162,6 @@ async function processarMensagem(phone, mensagem) {
       return { enviada: false, customer_type: contexto.customer_type };
     }
 
-    // Extrair resposta
     const resposta = lindyResponse.response || 'Obrigado! Logo retornamos.';
     const customer_type = lindyResponse.customer_type || 'desconhecido';
     const requires_human = lindyResponse.requires_human || false;
@@ -139,15 +175,14 @@ async function processarMensagem(phone, mensagem) {
 
     conversationContext.set(phone, contexto);
 
-    // Enviar resposta
     const enviada = await enviarRespostaWhatsApp(phone, resposta);
 
-    console.log(`✅ Concluído: ${customer_type}, Escalação: ${requires_human}`);
+    console.log(`✅ Concluído: ${customer_type}`);
 
     return { enviada, customer_type, requires_human };
 
   } catch (error) {
-    console.error('❌ Erro ao processar:', error.message);
+    console.error('❌ Erro:', error.message);
     return { enviada: false, customer_type: 'erro' };
   }
 }
@@ -189,10 +224,14 @@ async function enviarRespostaWhatsApp(phone, mensagem) {
   try {
     console.log(`📱 Enviando resposta para ${phone}`);
 
-    // Limpar número
+    // Se estiver em DRY_RUN, simula
+    if (DRY_RUN_MODE) {
+      console.log(`🟢 DRY_RUN: Não enviando para ${phone} (simulado)`);
+      return false;
+    }
+
     let phoneClean = phone.replace(/\D/g, '');
     
-    // Se for ID do WhatsApp, pular
     if (phone.includes('@')) {
       console.log('⚠️ ID do WhatsApp, pulando envio');
       return false;
@@ -225,6 +264,15 @@ async function enviarRespostaWhatsApp(phone, mensagem) {
 
 // ==================== DEBUG ====================
 
+app.get('/status', (req, res) => {
+  res.json({
+    dry_run_mode: DRY_RUN_MODE,
+    lindy_configured: isValidLindy,
+    mode: DRY_RUN_MODE ? '🟢 SIMULAÇÃO (seguro)' : '🔴 PRODUÇÃO (envia de verdade)',
+    message: DRY_RUN_MODE ? 'Nenhuma mensagem será enviada' : 'Mensagens serão enviadas para valer!'
+  });
+});
+
 app.get('/conversation/:phone', (req, res) => {
   const contexto = conversationContext.get(req.params.phone);
   res.json(contexto || { error: 'Não encontrada' });
@@ -245,17 +293,20 @@ app.get('/conversations', (req, res) => {
   res.json({ total: conversas.length, conversas });
 });
 
-app.post('/test-webhook', async (req, res) => {
-  const resultado = await processarMensagem('+5537999024357', 'Teste do sistema');
-  res.json({ test: true, resultado });
+app.post('/test-webhook', (req, res) => {
+  res.json({
+    test: true,
+    dry_run_mode: DRY_RUN_MODE,
+    mode: DRY_RUN_MODE ? '🟢 Nada será enviado (seguro)' : '🔴 Será enviado de verdade',
+    message: 'Teste executado'
+  });
 });
 
 // ==================== INICIAR ====================
 
 app.listen(PORT, () => {
   console.log('🚀 Servidor rodando em http://localhost:' + PORT);
-  console.log('✅ Webhook pronto em POST /webhook');
-  console.log('✅ Health check em GET /health');
+  console.log(`🔒 Modo: ${DRY_RUN_MODE ? '🟢 DRY_RUN (SEGURO)' : '🔴 PRODUÇÃO'}`);
 });
 
 module.exports = app;
